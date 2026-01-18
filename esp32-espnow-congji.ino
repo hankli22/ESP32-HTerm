@@ -1,7 +1,6 @@
 /*
- * 项目：LR 环境监测系统 - 传感器端 (Node 02 太阳能稳定版)
- * 硬件：Seeed XIAO ESP32-C3, AHT20, BMP280, 1M+2.2M 分压网络
- * 引脚：D6(VCC), D8(ADC 采样), D4/D5(I2C)
+ * 项目：Esp32-sensor (Node 02 - 临时测试版)
+ * 功能：去除深睡，串口输出详细电压调试信息，10秒一发
  */
 
 #include <esp_now.h>
@@ -12,17 +11,13 @@
 #include <rom/crc.h>
 #include <esp_wifi.h>
 
-// --- 引脚配置 ---
+// --- 引脚定义 ---
 const int S_VCC = 21; // D6 -> 传感器及分压网络正极
-const int S_ADC = 8;  // D8 -> GPIO 8 (分压中心点)
+const int S_ADC = 3;  // D1 -> GPIO 3 (ADC)
 const int S_SDA = 6;  // D4
 const int S_SCL = 7;  // D5
 
-// --- 通信与阈值 ---
 const uint8_t RECEIVER_MAC[] = {0x54, 0x32, 0x04, 0x46, 0x37, 0x8C};
-const float BATT_LOW_LIMIT = 3.50f; // 1500mAh 锂电池建议低压阈值
-const uint64_t NORMAL_SLEEP = 10 * 1000000ULL; // 10秒
-const uint64_t DEFENSE_SLEEP = 600 * 1000000ULL; // 低电量防守睡眠 10分钟
 
 typedef struct struct_message {
     float t1, h1, t2, p2;
@@ -34,76 +29,88 @@ struct_message myData;
 Adafruit_AHTX0 aht;
 Adafruit_BMP280 bmp;
 
-// 记录低电量状态的 RTC 变量
-RTC_DATA_ATTR bool low_bat_flag = false;
-
 void setup() {
-    // 1. 启动硬件并给传感层供电
-    setCpuFrequencyMhz(80); 
+    Serial.begin(115200);
+    delay(2000); // 给串口留出观察时间
+    Serial.println("\n--- Node 02 Debug System Starting ---");
+
+    // 1. 建立电源回路
     pinMode(S_VCC, OUTPUT);
-    digitalWrite(S_VCC, HIGH);
-    delay(15); // 给 AHT20 启动及分压网络稳定留出时间
+    digitalWrite(S_VCC, HIGH); 
+    Serial.println("Power (D6) set to HIGH.");
+    delay(100); // 留出充足时间让电压稳定
 
-    // 2. 电池电压采样与低功耗决策
-    // 分压计算：V_pin = V_bat * (2.2M / (1M + 2.2M)) -> V_bat = V_pin * 1.4545
-    analogRead(S_ADC); delay(5); // 预热采样
-    int raw = analogRead(S_ADC);
-    float v_pin = (raw / 4095.0f) * 3.1f; // 假设 11dB 衰减满量程 3.1V
-    float v_bat = v_pin * 1.4545f;
-
-    // 如果电压过低，进入保护模式
-    if (v_bat < BATT_LOW_LIMIT && v_bat > 2.0f) { // 2.0V以下视为未接电池
-        low_bat_flag = true;
-        digitalWrite(S_VCC, LOW);
-        esp_sleep_enable_timer_wakeup(DEFENSE_SLEEP);
-        esp_deep_sleep_start();
-    }
-
-    // 3. 传感器初始化
+    // 2. 传感器初始化
     Wire.begin(S_SDA, S_SCL);
-    if (!aht.begin() || (!bmp.begin(0x76) && !bmp.begin(0x77))) {
-        digitalWrite(S_VCC, LOW);
-        esp_sleep_enable_timer_wakeup(NORMAL_SLEEP);
-        esp_deep_sleep_start();
-    }
+    if (!aht.begin()) Serial.println("AHT20 not found!");
+    if (!bmp.begin(0x77) && !bmp.begin(0x76)) Serial.println("BMP280 not found!");
     bmp.setSampling(Adafruit_BMP280::MODE_FORCED);
 
-    // 4. 数据采集
+    // 3. 通信初始化
+    WiFi.mode(WIFI_STA);
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+    }
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, RECEIVER_MAC, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+    esp_now_add_peer(&peerInfo);
+    
+    Serial.println("Init Done. Starting loop...");
+}
+
+void loop() {
+    Serial.println("------------------------------------");
+
+    // --- 步骤 1: 电压调试采集 ---
+    analogRead(S_ADC); // 预读
+    delay(10);
+    int rawSum = 0;
+    for(int i=0; i<10; i++) {
+        rawSum += analogRead(S_ADC);
+        delay(5);
+    }
+    int rawAvg = rawSum / 10;
+
+    // ESP32-C3 ADC 公式 (11dB 衰减, 满量程约 3100mV)
+    float v_pin = (rawAvg / 4095.0f) * 3.1f;
+    float v_bat = v_pin * 1.4545f; // 1M+2.2M 还原
+
+    // 映射电量: 3.4V (0%) -> 4.2V (100%)
+    int pct = map((int)(v_bat * 100), 340, 420, 0, 100);
+    myData.status = (uint8_t)constrain(pct, 0, 100);
+
+    // 串口详细诊断信息输出
+    Serial.printf("ADC Raw Avg: %d\n", rawAvg);
+    Serial.printf("Pin Voltage: %.3f V\n", v_pin);
+    Serial.printf("Calc Battery: %.3f V\n", v_bat);
+    Serial.printf("Status Pct: %d%%\n", myData.status);
+
+    // --- 步骤 2: 环境数据采集 ---
     sensors_event_t humidity, temp;
     aht.getEvent(&humidity, &temp);
     myData.t1 = temp.temperature;
     myData.h1 = humidity.relative_humidity;
+    
     bmp.takeForcedMeasurement();
     myData.t2 = bmp.readTemperature();
     myData.p2 = bmp.readPressure() * 0.01f;
 
     myData.sen_typ = 1;
-    myData.sen_num = 2; // Node 02
-    
-    // 状态位逻辑：如果是从低电量恢复后的首包，标记为 1
-    myData.status = low_bat_flag ? 1 : 0;
-    if (low_bat_flag) low_bat_flag = false;
-
+    myData.sen_num = 2;
     myData.crc = crc32_le(0, (uint8_t const *)&myData, sizeof(myData) - 4);
 
-    // 5. 开启 Wi-Fi 并发送
-    WiFi.mode(WIFI_STA);
-    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
-    esp_wifi_set_max_tx_power(80); // 20dBm 满功率穿墙
+    // --- 步骤 3: 发送 ---
+    esp_err_t result = esp_now_send(RECEIVER_MAC, (uint8_t *) &myData, sizeof(myData));
     
-    if (esp_now_init() == ESP_OK) {
-        esp_now_peer_info_t peerInfo = {};
-        memcpy(peerInfo.peer_addr, RECEIVER_MAC, 6);
-        esp_now_add_peer(&peerInfo);
-        esp_now_send(RECEIVER_MAC, (uint8_t *) &myData, sizeof(myData));
-        delay(20); // 给 LR 模式留出物理层传输延迟
+    if (result == ESP_OK) {
+        Serial.println("ESP-NOW Send Success.");
+    } else {
+        Serial.println("ESP-NOW Send Failed.");
     }
 
-    // 6. 清场并深睡
-    esp_wifi_stop();
-    digitalWrite(S_VCC, LOW); // 切断传感器及分压网络电源
-    esp_sleep_enable_timer_wakeup(NORMAL_SLEEP);
-    esp_deep_sleep_start();
+    Serial.println("Wait 10 seconds...");
+    delay(10000); 
 }
-
-void loop() {}
