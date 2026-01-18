@@ -1,4 +1,3 @@
----
 # ESP32-HTERM
 
 ![GitHub release](https://img.shields.io/github/v/release/hankli22/ESP32-HTerm?color=blue&logo=github)
@@ -17,8 +16,6 @@
 
 **Optimized:** 
 *   Real-time **Memory/CPU monitoring** overlay.
-
----
 
 ### **Features:**
 1. **Dual-Mode Wireless**: Supports both WiFi and ESP-NOW LR.
@@ -40,5 +37,3 @@
 
 ### **Usage:**
 *   **Configuration**: You need to manually replace the placeholder values in `secret.cpp` with your actual credentials (WiFi SSID, Password, Hypixel API Key, and UUID) before flashing the firmware.
-
----
