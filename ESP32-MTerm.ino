@@ -1,8 +1,7 @@
 /*
- * Project: HANK-OS Ultimate Terminal (V9.8)
- * License: GNU GPL v3.0 | Author: hankli22
- * Status: Full logic version, resolved font inheritance, UI displacement, and WiFi/LR conflicts.
- * Copyright 2025-2026. copyright hankli22
+ * 项目：HANK-OS Ultimate Terminal (V9.8)
+ * 授权：GNU GPL v3.0 | 作者：hankli22
+ * 状态：逻辑完全展开版，解决字体继s承、UI错位、WiFi/LR冲突
  */
 
 #include <esp_now.h>
@@ -18,6 +17,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "secret.cpp"
+
+
+// ============================================================
+// 1. 全局定义与宏 (方便用户微调坐标)
+// ============================================================
 
 #define LINE1_Y 10
 #define LINE2_Y 23
@@ -37,6 +41,10 @@ typedef struct {
 
 uint8_t NEW_MAC[] = {0x54, 0x32, 0x04, 0x46, 0x37, 0x8C};
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE, 7, 6);
+
+// ============================================================
+// 2. 核心逻辑类 LRReceiver
+// ============================================================
 
 class LRReceiver {
 public:
@@ -72,6 +80,8 @@ public:
     int8_t setSelectIndex;   
     unsigned long lastActivity;
     bool isScreenPowerOff;
+
+    int16_t hypModeScrollX = 0; // 新增：Hypixel 模式的滚动 X 轴偏移
 
     Preferences prefs;
     static LRReceiver* instance;
@@ -127,7 +137,7 @@ public:
                 float p_angle = angle - (i * 0.4f);
                 int x = 64 + cos(p_angle) * 12;
                 int y = 28 + sin(p_angle) * 12;
-                u8g2.drawDisc(x, y, (i == 0) ? 2 : 1);
+                u8g2.drawDisc(x, y, (i == 0) ? 2 : 1); // 审美回归
             }
             u8g2.setFont(u8g2_font_6x10_tf);
             u8g2.drawStr(45, 48, "HANK-OS");
@@ -137,6 +147,7 @@ public:
         }
     }
     
+    // 修正后的 fetchHypixel：增加串口反馈和成功判定
     void fetchHypixel() {
         if (commMode == 0 || WiFi.status() != WL_CONNECTED) {
             return;
@@ -145,7 +156,12 @@ public:
         WiFiClientSecure client;
         client.setInsecure(); 
         HTTPClient http;
-        String url = "https://api.hypixel.net/v2/status?key=" + YOUR_HYPIXEL_APIKEY + "&uuid=" + YOUR_MINECRAFT_UUID;
+
+        String url = "https://api.hypixel.net/v2/status?key=";
+        url.concat(YOUR_HYPIXEL_APIKEY);
+        url.concat("&uuid=");
+        url.concat(YOUR_MINECRAFT_UUID);
+
         
         if (http.begin(client, url)) {
             int httpCode = http.GET();
@@ -156,8 +172,8 @@ public:
                 hypGame = doc["session"]["gameType"].as<String>();
                 hypMode = doc["session"]["mode"].as<String>();
                 
-                lastApiTick = xTaskGetTickCount();
-                ping1 = 1; 
+                lastApiTick = xTaskGetTickCount(); // 更新刷新时间戳
+                ping1 = 1; // 成功后触发一次涟漪
             }
             http.end();
         }
@@ -204,17 +220,50 @@ public:
         instance->onDataReceived(info, data, len);
     }
 
+    // --- 页面绘图子模块 ---
+    // --- 方法: 绘制 Hypixel 页面 (带 Mode 滚动) ---
     void drawHypixelPage(int x) {
+        // 1. 设置主字体
         u8g2.setFont(u8g2_font_6x10_tf);
+
+        // 2. 绘制静态 Header
         u8g2.setCursor(x + 2, LINE1_Y);
         u8g2.print("HYPIXEL STATUS");
         u8g2.drawHLine(x, LINE1_Y + 1, 128);
+
+        // 3. 绘制静态数据
         u8g2.setCursor(x + 2, LINE2_Y);
         u8g2.printf("Online:%s", hypOnline ? "YES" : "NO");
+        
         u8g2.setCursor(x + 2, LINE3_Y);
         u8g2.printf("Game:%s", hypGame.c_str());
+
+        // 4. 动态绘制 Mode (带滚动逻辑)
         u8g2.setCursor(x + 2, LINE4_Y);
-        u8g2.printf("Mode:%s", hypMode.c_str());
+        u8g2.print("Mode:");
+        
+        // 计算 "Mode:" 标签后的可用空间
+        const int availableWidth = 128 - u8g2.getCursorX() - 2; 
+        int modeWidth = u8g2.getStrWidth(hypMode.c_str());
+
+        if (modeWidth > availableWidth) {
+            // 如果 Mode 太长，启动跑马灯
+            u8g2.setCursor(x + 40 + hypModeScrollX, LINE4_Y+10);
+            u8g2.print(hypMode.c_str());
+            
+            // 动画步进：向左滚动
+            hypModeScrollX--;
+            
+            // 当文字完全滚出左侧屏幕时，让它从右侧重新进入
+            if (hypModeScrollX < -modeWidth) {
+                hypModeScrollX = availableWidth;
+            }
+        } else {
+            // 如果能放下，则静态显示
+            u8g2.setCursor(x + 40, LINE4_Y);
+            u8g2.print(hypMode.c_str());
+            hypModeScrollX = 0; // 重置滚动
+        }
     }
 
     void drawNodePage(int id, int x) {
@@ -224,7 +273,7 @@ public:
             u8g2.printf("#%d", id);
             return;
         }
-
+        // 信号强度
         int bars = map(constrain(nodeRssi[id], -100, -30), -100, -30, 1, 5);
         for (int i = 0; i < 5; i++) {
             if (i < bars) {
@@ -233,7 +282,7 @@ public:
                 u8g2.drawFrame(x + 108 + (i * 4), 8 - (i * 2), 3, i * 2 + 2);
             }
         }
-
+        // 涟漪动画
         if (id == currentPage && !isDetailMode) {
             if (ping1 > 0) { u8g2.drawCircle(x+10, 10, ping1); }
             if (ping2 > 0) { u8g2.drawCircle(x+10, 10, ping2); }
@@ -268,7 +317,7 @@ public:
             int y = 22 + i * 11;
             if (setSelectIndex == i) {
                 u8g2.setDrawColor(1);
-                u8g2.drawBox(x, y - 9, 128, 11);
+                u8g2.drawBox(x, y - 9, 128, 11); // 修复后的高亮框
             }
             u8g2.setDrawColor(setSelectIndex == i ? 0 : 1);
             u8g2.setCursor(x + 5, y);
@@ -322,6 +371,10 @@ public:
 LRReceiver receiver;
 LRReceiver* LRReceiver::instance = &receiver;
 
+// ============================================================
+// 3. FreeRTOS 任务
+// ============================================================
+
 void TaskKeys(void *pvParameters) {
     pinMode(BTN_LEFT, INPUT_PULLUP);
     pinMode(BTN_RIGHT, INPUT_PULLUP);
@@ -336,6 +389,7 @@ void TaskKeys(void *pvParameters) {
             receiver.wakeUp();
         }
 
+        // --- 组合键判定 ---
         if (L && R) {
             if (pressStart == 0) {
                 pressStart = millis();
@@ -359,13 +413,15 @@ void TaskKeys(void *pvParameters) {
             isChord = false;
             pressStart = 0;
         } 
+        // --- 单键导航裁剪逻辑 ---
         else if ((L || R) && !isChord) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(100)); // 100ms 宽容窗
             if (digitalRead(BTN_LEFT) == LOW && digitalRead(BTN_RIGHT) == LOW) {
                 continue;
             }
 
             if (receiver.isSettingsMode) {
+                // 设置页面内的操作逻辑 (保持你之前的成功版本)
                 if (L) {
                     receiver.setSelectIndex = (receiver.setSelectIndex + 3) % 4;
                 }
@@ -384,6 +440,7 @@ void TaskKeys(void *pvParameters) {
                 }
             } 
             else if (receiver.isDetailMode) {
+                // 详情模式下的左右切换
                 if (R) {
                     receiver.detailSub = (receiver.detailSub + 1) % 3;
                 } else {
@@ -391,18 +448,23 @@ void TaskKeys(void *pvParameters) {
                 }
             } 
             else {
+                // --- 重点：根据通信模式进行页面裁剪导航 ---
                 if (receiver.commMode == 1) { 
+                    // WiFi 模式：只允许在 0 和 5 之间跳转
                     if (receiver.currentPage == 0) {
                         receiver.currentPage = 5;
                     } else {
                         receiver.currentPage = 0;
-                        receiver.fetchHypixel();
+                        receiver.fetchHypixel(); // 回到首页触发刷新
                     }
                 } 
                 else { 
+                    // LR 模式：只允许在 1, 2, 3, 4, 5 之间跳转，跳过 0
                     if (R) {
+                        // 1->2->3->4->5->1
                         receiver.currentPage = (receiver.currentPage % 5) + 1;
                     } else {
+                        // 1->5->4->3->2->1
                         if (receiver.currentPage <= 1) {
                             receiver.currentPage = 5;
                         } else {
@@ -411,7 +473,7 @@ void TaskKeys(void *pvParameters) {
                     }
                 }
             }
-            vTaskDelay(pdMS_TO_TICKS(250));
+            vTaskDelay(pdMS_TO_TICKS(250)); // 全局去抖
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
@@ -422,25 +484,28 @@ void TaskDisp(void *pvParameters) {
     uint32_t frameWorkTime;
 
     for (;;) {
+        // --- 1. 自动息屏管理逻辑 ---
         uint32_t offTimeTable[] = {0, 30000, 60000}; 
         if (receiver.setScreenOff > 0) {
             uint32_t inactiveMs = millis() - receiver.lastActivity;
             if (inactiveMs > offTimeTable[receiver.setScreenOff]) {
                 if (receiver.isScreenPowerOff == false) {
-                    u8g2.setPowerSave(1);
+                    u8g2.setPowerSave(1); // 物理关闭屏幕显示
                     receiver.isScreenPowerOff = true;
                 }
-                vTaskDelay(pdMS_TO_TICKS(100));
+                vTaskDelay(pdMS_TO_TICKS(100)); // 息屏状态下降低检测频率
                 continue; 
             }
         }
 
-        if (receiver.commMode == 1) {
-            if (receiver.currentPage == 0) {
-                if (receiver.isSettingsMode == false) {
+        // --- 2. WiFi 模式下的 Hypixel 自动刷新定时器 ---
+        if (receiver.commMode == 1) { // 仅在 WiFi 模式
+            if (receiver.currentPage == 0) { // 仅在首页
+                if (receiver.isSettingsMode == false) { // 且不在设置界面
                     uint32_t nowTick = xTaskGetTickCount();
                     uint32_t elapsedMs = (nowTick - receiver.lastApiTick) * portTICK_PERIOD_MS;
                     
+                    // 每 30 秒自动抓取一次数据
                     if (elapsedMs > 30000 || receiver.lastApiTick == 0) {
                         receiver.fetchHypixel();
                     }
@@ -448,30 +513,40 @@ void TaskDisp(void *pvParameters) {
             }
         }
 
+        // --- 3. 准备渲染新的一帧 ---
         frameStartTime = micros();
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_6x10_tf);
         u8g2.setDrawColor(1);
         receiver.heartbeat++;
 
+        // 3.1 计算主页面滑动偏移 (0.82/0.18 一阶滤波)
         receiver.targetX = receiver.currentPage * 128.0f;
         receiver.scrollX = (receiver.scrollX * 0.82f) + (receiver.targetX * 0.18f);
 
+        // 3.2 计算详情子页面滑动偏移 (温/湿/压 切换动画)
         receiver.subTargetX = receiver.detailSub * 128.0f;
         receiver.subScrollX = (receiver.subScrollX * 0.82f) + (receiver.subTargetX * 0.18f);
 
+        // --- 4. 页面分流渲染引擎 ---
+        
         if (receiver.isSettingsMode == true) {
+            // A 分支: 浮窗式设置界面 (无视背景滚动)
             receiver.drawSettingsPage(0);
         } 
         else if (receiver.isDetailMode == true) {
-            u8g2.drawRFrame(0, 0, 128, 64, 3);
+            // B 分支: 详情图表/战绩展示模式
+            u8g2.drawRFrame(0, 0, 128, 64, 3); // 绘制模式外框
             
             if (receiver.currentPage == 0) {
-                receiver.drawHypixelPage(0);
+                // 情况 1: Hypixel 战绩详情页
+                receiver.drawHypixelPage(0); // 复用逻辑
             } 
             else {
+                // 情况 2: 传感器温/湿/压滑动折线图
                 for (int s = 0; s < 3; s++) {
                     int sx = (s * 128) - (int)receiver.subScrollX;
+                    // 仅绘制在 128 像素视口内的图表
                     if (sx > -128 && sx < 128) {
                         if (s == 0) {
                             receiver.drawChart(receiver.hT[receiver.currentPage], receiver.hCount[receiver.currentPage], "TEMP", "C", sx + 4, 10, 120, 48);
@@ -487,7 +562,10 @@ void TaskDisp(void *pvParameters) {
             }
         } 
         else {
+            // C 分支: 正常滑动模式 (实施 Culling 裁剪)
+            
             if (receiver.commMode == 1) {
+                // --- WiFi 模式裁剪：仅渲染 Page 0 和 Page 5 ---
                 int pagesWiFi[] = {0, 5};
                 for (int j = 0; j < 2; j++) {
                     int pIdx = pagesWiFi[j];
@@ -502,6 +580,7 @@ void TaskDisp(void *pvParameters) {
                 }
             } 
             else {
+                // --- LR 模式裁剪：渲染 Page 1 到 Page 5 ---
                 for (int i = 1; i <= 5; i++) {
                     int xo = (i * 128) - (int)receiver.scrollX;
                     if (xo > -128 && xo < 128) {
@@ -514,13 +593,18 @@ void TaskDisp(void *pvParameters) {
                 }
             }
 
+            // 绘制底部新鲜度进度条
             uint32_t refTick = (receiver.currentPage == 0) ? receiver.lastApiTick : receiver.lastPacketTick;
             uint32_t deltaTick = xTaskGetTickCount() - refTick;
+            // 倒计时映射 (60秒刷新周期)
             float barTargetW = (1.0f - (constrain((float)deltaTick * portTICK_PERIOD_MS, 0.0f, 60000.0f) / 60000.0f)) * 128.0f;
             receiver.smoothWidth = (receiver.smoothWidth * 0.85f) + (barTargetW * 0.15f);
             u8g2.drawBox(0, 62, (uint8_t)receiver.smoothWidth, 2);
         }
 
+        // --- 5. 核心动画：三重巨浪 (速率 5-4-3) ---
+        
+        // 第一道波
         if (receiver.ping1 > 0) { 
             u8g2.drawCircle(10, 10, receiver.ping1);
             receiver.ping1 += 5; 
@@ -529,6 +613,7 @@ void TaskDisp(void *pvParameters) {
             }
         }
 
+        // 第二道波
         if (receiver.ping2 > 0) { 
             u8g2.drawCircle(10, 10, receiver.ping2);
             receiver.ping2 += 4; 
@@ -537,12 +622,13 @@ void TaskDisp(void *pvParameters) {
             }
         } 
         else if (receiver.ping2 < 0) { 
-            receiver.ping2++;
+            receiver.ping2++; // 独立倒计时
             if (receiver.ping2 == 0) {
                 receiver.ping2 = 1;
             }
         }
 
+        // 第三道波
         if (receiver.ping3 > 0) { 
             u8g2.drawCircle(10, 10, receiver.ping3);
             receiver.ping3 += 3; 
@@ -551,25 +637,32 @@ void TaskDisp(void *pvParameters) {
             }
         } 
         else if (receiver.ping3 < 0) { 
-            receiver.ping3++;
+            receiver.ping3++; // 独立倒计时
             if (receiver.ping3 == 0) {
                 receiver.ping3 = 1;
             }
         }
 
+        // --- 6. 完成绘图并进行系统统计 ---
+        
+        // 右上角心跳点
         if ((receiver.heartbeat % 20) < 10) {
             u8g2.drawPixel(127, 0);
         }
 
         u8g2.sendBuffer();
 
+        // 性能指标计算
         frameWorkTime = micros() - frameStartTime;
         receiver.freeMem = esp_get_free_heap_size();
+        // 目标周期为 15.15ms (66FPS)
         receiver.cpuLoad = (frameWorkTime * 100.0f) / 15151.0f; 
 
+        // 维持 66 FPS
         vTaskDelay(pdMS_TO_TICKS(15)); 
     }
 }
+
 
 
 void setup() {
