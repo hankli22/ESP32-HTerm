@@ -1,10 +1,9 @@
-# ESP32-HTERM
-
-![GitHub release](https://img.shields.io/github/v/release/hankli22/ESP32-HTerm?color=blue&logo=github)
-![License](https://img.shields.io/github/license/hankli22/ESP32-HTerm?color=green)
+# ESP32-MTERM
 ![Top Language](https://img.shields.io/github/languages/top/hankli22/ESP32-HTerm)
+![GitHub release](https://img.shields.io/github/v/release/hankli22/ESP32-MTerm?color=blue&logo=github)
+![License](https://img.shields.io/github/license/hankli22/ESP32-MTerm?color=green)
 
-### **ESP32-HTERM v1.0.0 Changelog**
+### **ESP32-MTERM v1.0.0 Changelog**
 
 **Added:** 
 *   **Hypixel API support** with real-time status tracking!
